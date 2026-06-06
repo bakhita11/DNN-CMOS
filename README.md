@@ -53,4 +53,50 @@ Physics-Informed Deep Learning and Bayesian Optimization for Nanosheet and Forks
 Contact
 DR. Bakhita Salman
 TAMIU, TX
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+## gaa_device_model.py
+
+A transparent, physics-based compact device model for gate-all-around (GAA)
+nanosheet (NS) and forksheet (FS) field-effect transistors. The model
+implements the standard device-physics relations used in compact modeling:
+
+- Thermionic subthreshold conduction with a finite subthreshold slope set by
+  the gate/depletion capacitance ratio (subthreshold swing above the 60 mV/dec
+  room-temperature limit).
+- Drain-induced barrier lowering (DIBL) via a drain-bias-dependent threshold
+  shift.
+- Above-threshold drift current including mobility, velocity saturation, and
+  source/drain series resistance.
+- GAA effective width derived from the sheet cross-sectional geometry and the
+  number of stacked sheets.
+
+The forksheet configuration is represented through its dielectric-wall
+asymmetry (slightly weaker electrostatic control and higher series resistance
+than the symmetric nanosheet) as a documented compact-model-level
+approximation.
+
+### Outputs
+Running the script characterizes both NS and FS devices and reports:
+subthreshold swing (SS), DIBL, threshold voltage (Vth), on-current (Ion),
+off-current (Ioff), and the Ion/Ioff ratio. It also generates:
+- `idvg_ns_fs.png` — Id–Vg comparison (linear and saturation)
+- `idvd_ns.png` — Id–Vd output family for the nanosheet device
+
+### Usage
+```bash
+pip install numpy matplotlib
+python gaa_device_model.py
+```
+
+### Note
+This is a self-contained, reproducible compact device model implementing
+standard GAA subthreshold and drift transport physics. It is independent of,
+and not a substitute for, the Berkeley BSIM-CMG standard model; the parameter
+values used are illustrative 5 nm-class defaults and are not calibrated to a
+specific foundry process.
  
