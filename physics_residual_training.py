@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # ============================================================
-# physics_residual_training.py
-# Adds a BOUNDED-OUTPUT physics-residual penalty to the DNN surrogate loss
-# and compares baseline (MSE only) vs physics-constrained (MSE + lambda*residual).
+# physics_bounded_training.py
+# Enforces the physical constraint 0 <= Vout <= VDD by CONSTRUCTION using a
+# hard architectural bound (scaled sigmoid output), guaranteeing physically
+# admissible predictions everywhere -- in-distribution AND out-of-distribution.
 #
-# Physical constraint enforced (soft penalty, differentiable):
-#   The inverter output voltage must satisfy 0 <= Vout <= VDD.
-#   Predictions outside this physical band are penalized quadratically.
+# Compares:
+#   Baseline      : unconstrained linear output (standard DNN surrogate)
+#   Bounded model : final output = VDD * sigmoid(z)  -> always in (0, VDD)
 #
-# Reports for BOTH models on the held-out test set:
-#   - R2, RMSE
-#   - fraction of predictions outside the physical [0, VDD] band
-#   - mean magnitude of bound violation
+# Reports R2 (in-distribution) and the fraction / magnitude of physically
+# out-of-bound predictions on an out-of-distribution (OOD) probe -- the regime
+# a Bayesian optimizer can push into during design-space exploration.
+#
 # Run in an environment with PyTorch (e.g., Colab).
 # ============================================================
 import numpy as np
@@ -44,22 +45,26 @@ X = np.column_stack([d['L'], d['W'], d['VDD'], d['Temp'], d['Vth'], d['time'],
 y = d['Vout'].reshape(-1, 1)
 vdd_col = d['VDD'].reshape(-1, 1)
 
-Xs = MinMaxScaler(); ys = MinMaxScaler()
-Xn = Xs.fit_transform(X); yn = ys.fit_transform(y)
+# scale INPUTS only; keep the target in PHYSICAL volts so the bounded model can
+# multiply its sigmoid by the physical VDD carried alongside each sample.
+Xs = MinMaxScaler()
+Xn = Xs.fit_transform(X)
 
 idx = np.arange(len(Xn))
-Xtr, Xte, ytr, yte, itr, ite = train_test_split(Xn, yn, idx, test_size=0.2, random_state=42)
+(Xtr, Xte, ytr, yte, vtr, vte, itr, ite) = train_test_split(
+    Xn, y, vdd_col, idx, test_size=0.2, random_state=42)
 
 Xtr_t = torch.tensor(Xtr, dtype=torch.float32)
-ytr_t = torch.tensor(ytr, dtype=torch.float32)
+ytr_t = torch.tensor(ytr, dtype=torch.float32)         # physical volts
 Xte_t = torch.tensor(Xte, dtype=torch.float32)
+vtr_t = torch.tensor(vtr, dtype=torch.float32)         # physical VDD per sample
+vte_t = torch.tensor(vte, dtype=torch.float32)
 
-y_min = ys.data_min_[0]; y_max = ys.data_max_[0]
-def to_norm(v): return (v - y_min) / (y_max - y_min)
-lower_n = torch.tensor(to_norm(0.0), dtype=torch.float32)
-upper_tr = torch.tensor(to_norm(vdd_col[itr]), dtype=torch.float32)
+# normalize the loss by a fixed scale so MSE magnitudes are comparable
+YSCALE = float(y.max())
 
-class Net(nn.Module):
+class BaselineNet(nn.Module):
+    """Unconstrained linear output (standard surrogate)."""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
@@ -67,61 +72,92 @@ class Net(nn.Module):
             nn.Linear(128,128), nn.BatchNorm1d(128), nn.ReLU(), nn.Dropout(0.2),
             nn.Linear(128,64), nn.ReLU(),
             nn.Linear(64,1))
-    def forward(self,x): return self.net(x)
+    def forward(self, x, vdd):
+        return self.net(x)                       # unbounded volts
+
+class BoundedNet(nn.Module):
+    """Hard physical bound: output = VDD * sigmoid(z) in (0, VDD) by construction."""
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(8,128), nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Linear(128,128), nn.BatchNorm1d(128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(128,64), nn.ReLU(),
+            nn.Linear(64,1))
+    def forward(self, x, vdd):
+        z = self.net(x)
+        return vdd * torch.sigmoid(z)            # guaranteed in (0, VDD)
 
 mse = nn.MSELoss()
 
-def bound_penalty(pred):
-    over  = torch.relu(pred - upper_tr)
-    under = torch.relu(lower_n - pred)
-    return (over**2 + under**2).mean()
-
-def train(use_physics, lam=10.0, epochs=150):
+def train(model, epochs=150):
     torch.manual_seed(42)
-    model = Net()
     opt = optim.Adam(model.parameters(), lr=5e-4)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, 'min', factor=0.5, patience=10)
     for ep in range(epochs):
         model.train()
-        out = model(Xtr_t)
-        loss = mse(out, ytr_t)
-        if use_physics:
-            loss = loss + lam * bound_penalty(out)
+        out = model(Xtr_t, vtr_t)
+        loss = mse(out / YSCALE, ytr_t / YSCALE)
         opt.zero_grad(); loss.backward(); opt.step()
-        sched.step(loss)
+        sched.step(loss.item())
     return model
 
-def evaluate(model, tag):
+def evaluate_id(model, tag):
     model.eval()
     with torch.no_grad():
-        pred = model(Xte_t).numpy()
-    pred_real = ys.inverse_transform(pred)
-    true_real = ys.inverse_transform(yte)
-    r2 = r2_score(true_real, pred_real)
-    rmse = np.sqrt(mean_squared_error(true_real, pred_real))
-    vdd_te = vdd_col[ite].flatten()
-    pr = pred_real.flatten()
-    frac_oob = np.mean((pr < -0.005) | (pr > vdd_te + 0.005))
-    viol = np.maximum(0, pr - vdd_te) + np.maximum(0, -pr)
-    mean_viol = viol.mean()
-    print(f"\n===== {tag} =====")
-    print(f"  Test R2                          : {r2:.4f}")
-    print(f"  Test RMSE                        : {rmse:.4f}")
-    print(f"  Predictions outside [0,VDD]      : {frac_oob*100:.3f}%")
-    print(f"  Mean bound-violation magnitude   : {mean_viol*1e3:.3f} mV")
-    return dict(r2=r2, rmse=rmse, oob=frac_oob, viol=mean_viol)
+        pred = model(Xte_t, vte_t).numpy().flatten()
+    true = yte.flatten()
+    r2 = r2_score(true, pred)
+    rmse = np.sqrt(mean_squared_error(true, pred))
+    vdd_te = vte.flatten()
+    frac_oob = np.mean((pred < -0.005) | (pred > vdd_te + 0.005))
+    print(f"\n===== {tag} : in-distribution test set =====")
+    print(f"  Test R2                       : {r2:.4f}")
+    print(f"  Test RMSE                     : {rmse:.4f}")
+    print(f"  Predictions outside [0,VDD]   : {frac_oob*100:.3f}%")
+    return dict(r2=r2, rmse=rmse, oob=frac_oob)
+
+def make_ood_probe(n=5000):
+    rng = np.random.default_rng(7)
+    L = rng.uniform(100e-9, 300e-9, n)
+    W = rng.uniform(10e-6, 30e-6, n)
+    VDD = rng.uniform(1.2, 2.0, n)
+    Temp = rng.uniform(200, 450, n)
+    Vth = rng.normal(0.4, 0.08, n)
+    time = rng.uniform(0, 2e-6, n)
+    Xo = np.column_stack([L, W, VDD, Temp, Vth, time, W/L, VDD - Vth])
+    return Xo, VDD
+
+def evaluate_ood(model, tag):
+    Xo, vdd_o = make_ood_probe()
+    Xo_n = Xs.transform(Xo)
+    model.eval()
+    with torch.no_grad():
+        pred = model(torch.tensor(Xo_n, dtype=torch.float32),
+                     torch.tensor(vdd_o.reshape(-1,1), dtype=torch.float32)).numpy().flatten()
+    frac_oob = np.mean((pred < -0.005) | (pred > vdd_o + 0.005))
+    viol = np.maximum(0, pred - vdd_o) + np.maximum(0, -pred)
+    print(f"\n----- {tag} : OUT-OF-DISTRIBUTION probe -----")
+    print(f"  Predictions outside [0,VDD]   : {frac_oob*100:.3f}%")
+    print(f"  Mean bound-violation (mV)     : {viol.mean()*1e3:.3f}")
+    print(f"  Max  bound-violation (mV)     : {viol.max()*1e3:.3f}")
+    return dict(oob=frac_oob, viol=viol.mean(), maxviol=viol.max())
 
 if __name__ == "__main__":
-    print("Training baseline (MSE only)...")
-    m_base = train(use_physics=False)
-    r_base = evaluate(m_base, "Baseline (MSE only)")
+    print("Training baseline (unconstrained output)...")
+    base = train(BaselineNet())
+    rb = evaluate_id(base, "Baseline (unconstrained)")
+    ob = evaluate_ood(base, "Baseline (unconstrained)")
 
-    print("\nTraining physics-constrained (MSE + bounded-output penalty)...")
-    m_phys = train(use_physics=True)
-    r_phys = evaluate(m_phys, "Physics-constrained")
+    print("\nTraining bounded model (hard VDD*sigmoid output)...")
+    bnd = train(BoundedNet())
+    rp = evaluate_id(bnd, "Bounded (VDD*sigmoid)")
+    op = evaluate_ood(bnd, "Bounded (VDD*sigmoid)")
 
     print("\n===== SUMMARY =====")
-    print(f"{'':<34}{'Baseline':>12}{'Physics':>12}")
-    print(f"{'Test R2':<34}{r_base['r2']:>12.4f}{r_phys['r2']:>12.4f}")
-    print(f"{'Out-of-bound predictions (%)':<34}{r_base['oob']*100:>12.3f}{r_phys['oob']*100:>12.3f}")
-    print(f"{'Mean violation (mV)':<34}{r_base['viol']*1e3:>12.3f}{r_phys['viol']*1e3:>12.3f}")
+    print(f"{'':<36}{'Baseline':>12}{'Bounded':>12}")
+    print(f"{'Test R2 (in-distribution)':<36}{rb['r2']:>12.4f}{rp['r2']:>12.4f}")
+    print(f"{'In-dist out-of-bound (%)':<36}{rb['oob']*100:>12.3f}{rp['oob']*100:>12.3f}")
+    print(f"{'OOD out-of-bound (%)':<36}{ob['oob']*100:>12.3f}{op['oob']*100:>12.3f}")
+    print(f"{'OOD mean violation (mV)':<36}{ob['viol']*1e3:>12.3f}{op['viol']*1e3:>12.3f}")
+    print(f"{'OOD max violation (mV)':<36}{ob['maxviol']*1e3:>12.3f}{op['maxviol']*1e3:>12.3f}")
