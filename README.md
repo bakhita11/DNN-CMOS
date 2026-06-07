@@ -58,45 +58,56 @@ TAMIU, TX
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+## Device-Level Analysis Scripts
 
-## gaa_device_model.py
+The following scripts implement the device-level analyses reported in the
+manuscript (Sections on device benchmarking, physical admissibility, and the
+architecture-level study). They are independent of, and complementary to, the
+main DNN surrogate / Bayesian optimization pipeline.
 
+### gaa_device_model.py
 A transparent, physics-based compact device model for gate-all-around (GAA)
-nanosheet (NS) and forksheet (FS) field-effect transistors. The model
-implements the standard device-physics relations used in compact modeling:
+nanosheet (NS) and forksheet (FS) field-effect transistors. It implements the
+standard device-physics relations used in compact modeling: thermionic
+subthreshold conduction with a finite subthreshold slope, drain-induced barrier
+lowering (DIBL) via a drain-bias-dependent threshold shift, and above-threshold
+drift current with mobility, velocity saturation, and source/drain series
+resistance. Running the script computes Id–Vg / Id–Vd characteristics and
+extracts subthreshold swing (SS), DIBL, threshold voltage, on-current (Ion),
+off-current (Ioff), and the Ion/Ioff ratio for both NS and FS configurations.
 
-- Thermionic subthreshold conduction with a finite subthreshold slope set by
-  the gate/depletion capacitance ratio (subthreshold swing above the 60 mV/dec
-  room-temperature limit).
-- Drain-induced barrier lowering (DIBL) via a drain-bias-dependent threshold
-  shift.
-- Above-threshold drift current including mobility, velocity saturation, and
-  source/drain series resistance.
-- GAA effective width derived from the sheet cross-sectional geometry and the
-  number of stacked sheets.
+*Note:* This is a self-contained compact device model implementing standard GAA
+transport physics. It is independent of, and not a substitute for, the Berkeley
+BSIM-CMG standard model; the parameter values used are illustrative 5 nm-class
+defaults and are not calibrated to a specific foundry process. The forksheet
+configuration is represented through its dielectric-wall asymmetry (slightly
+weaker electrostatic control and higher series resistance than the symmetric
+nanosheet) as a documented compact-model-level approximation.
 
-The forksheet configuration is represented through its dielectric-wall
-asymmetry (slightly weaker electrostatic control and higher series resistance
-than the symmetric nanosheet) as a documented compact-model-level
-approximation.
+### physics_bounded_training.py
+Demonstrates physical admissibility of the surrogate's predictions. It compares
+an unconstrained baseline DNN with a model whose output layer computes
+`Vout = VDD * sigmoid(z)`, which restricts every prediction to the physical band
+(0, VDD) by construction. Both models are evaluated on the in-distribution test
+set and on an out-of-distribution (OOD) probe that samples parameter
+combinations beyond the training ranges — the regime a Bayesian optimizer can
+explore. The script reports test R2 and the fraction and magnitude of
+physically out-of-bound predictions, showing that the bounded model eliminates
+the OOD bound violations produced by the unconstrained baseline.
 
-### Outputs
-Running the script characterizes both NS and FS devices and reports:
-subthreshold swing (SS), DIBL, threshold voltage (Vth), on-current (Ion),
-off-current (Ioff), and the Ion/Ioff ratio. It also generates:
-- `idvg_ns_fs.png` — Id–Vg comparison (linear and saturation)
-- `idvd_ns.png` — Id–Vd output family for the nanosheet device
+### architecture_sweep.py
+Uses `gaa_device_model.py` to study two architecture-critical structural
+degrees of freedom for nanosheet devices: (1) the number of stacked sheets
+(1–5), showing how on-current scales with effective width; and (2) the sheet
+aspect ratio (width-to-height) at fixed cross-sectional area, showing the trend
+in electrostatic control (SS and DIBL). Outputs printed tables and the figure
+`architecture_sweep.png`.
 
-### Usage
-```bash
-pip install numpy matplotlib
-python gaa_device_model.py
-```
+*Note:* In the aspect-ratio sweep, the dependence of SS and DIBL on aspect ratio
+is imposed as a documented compact-model-level trend (thinner channels yield
+stronger gate control), not derived from first-principles three-dimensional
+electrostatics. It encodes the known qualitative behavior; quantitative values
+require TCAD. The sheet-count scaling of on-current, by contrast, follows
+directly from the effective-width physics in the model.
 
-### Note
-This is a self-contained, reproducible compact device model implementing
-standard GAA subthreshold and drift transport physics. It is independent of,
-and not a substitute for, the Berkeley BSIM-CMG standard model; the parameter
-values used are illustrative 5 nm-class defaults and are not calibrated to a
-specific foundry process.
- 
+### Requirements
